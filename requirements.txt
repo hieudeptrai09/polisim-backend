@@ -1,3 +1,6 @@
 fastapi
 uvicorn[standard]
 vnstock
+yfinance
+numpy
+pandas
