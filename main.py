@@ -80,10 +80,9 @@ def _fetch_all_stocks(target: int = 250):
     _fetch_status.update({"running": True, "failed": []})
 
     try:
-        # New API: use Vnstock().stock() to get a listing of all symbols
-        client = Vnstock()
-        listing = client.stock(symbol="VNM", source="VCI")  # symbol required but ignored for listing
-        all_df = listing.listing.all_symbols(show_log=False)
+        # Step 1: get full symbol list — Listing() is independent, no symbol needed
+        from vnstock import Listing
+        all_df = Listing().all_symbols(show_log=False)
         symbol_col = "symbol" if "symbol" in all_df.columns else all_df.columns[0]
         all_symbols = all_df.dropna(subset=[symbol_col])
 
@@ -95,10 +94,10 @@ def _fetch_all_stocks(target: int = 250):
         _fetch_status["total"] = len(existing) + len(stocks_df)
         _fetch_status["done"] = len(existing)
 
+        # Step 2: for each symbol, fetch history + fundamentals via Vnstock().stock()
         for _, row in stocks_df.iterrows():
             sym = str(row.get("symbol", row.iloc[0])).strip().upper()
             try:
-                # New API: initialise per-symbol ticker object, then call quote.history
                 ticker = Vnstock().stock(symbol=sym, source="VCI")
                 hist = ticker.quote.history(
                     start="2023-01-01", end="2026-03-20",
