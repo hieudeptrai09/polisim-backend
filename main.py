@@ -14,7 +14,7 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -170,68 +170,58 @@ def root():
         "service": "PoliSim Stock API",
         "stocks_ready": len(_cache),
         "endpoints": {
-            "all_stocks":   "GET  /api/stocks",
-            "single_stock": "GET  /api/stocks/{symbol}",
-            "start_fetch":  "POST /api/fetch?target=250",
-            "fetch_status": "GET  /api/fetch/status",
+            "all_stocks":   "GET /api/stocks",
+            "single_stock": "GET /api/stocks/{symbol}",
+            "clear_cache":  "DELETE /api/stocks",
         },
     }
 
 
 @app.get("/api/stocks")
-def get_all_stocks():
+def get_all_stocks(length: int = 250):
     """
-    Return all fetched stocks as a JSON object keyed by symbol.
-    Same shape as the old stocks_data.json — drop-in replacement.
+    Return stocks as a JSON object keyed by symbol.
+    Auto-fetches from vnstock on first call if cache is empty.
+    Use ?length=50 to fetch fewer stocks and avoid timeout on slow servers.
     """
+    global _cache
     data = _cache or _load_from_disk()
+
+    # Auto-fetch if nothing in cache yet
     if not data:
-        raise HTTPException(
-            status_code=404,
-            detail="No stock data yet. POST /api/fetch to start fetching.",
-        )
+        if not VNSTOCK_AVAILABLE:
+            raise HTTPException(status_code=503, detail="vnstock not installed on server")
+        _fetch_all_stocks(target=length)
+        data = _cache
+
+    if not data:
+        raise HTTPException(status_code=503, detail="Failed to fetch stock data")
+
     return data
 
 
 @app.get("/api/stocks/{symbol}")
 def get_stock(symbol: str):
     """Return a single stock by ticker symbol (e.g. /api/stocks/HPG)."""
-    sym  = symbol.strip().upper()
+    global _cache
     data = _cache or _load_from_disk()
+
+    # Auto-fetch if nothing in cache yet
+    if not data:
+        if not VNSTOCK_AVAILABLE:
+            raise HTTPException(status_code=503, detail="vnstock not installed on server")
+        _fetch_all_stocks(target=250)
+        data = _cache
+
+    sym = symbol.strip().upper()
     if sym not in data:
         raise HTTPException(status_code=404, detail=f"Symbol '{sym}' not found")
     return data[sym]
 
 
-@app.get("/api/fetch/status")
-def fetch_status():
-    """Check background fetch progress."""
-    return {**_fetch_status, "stocks_ready": len(_cache)}
-
-
-@app.post("/api/fetch")
-def start_fetch(background_tasks: BackgroundTasks, target: int = 250):
-    """
-    Kick off a background job that fetches up to `target` stocks from vnstock.
-    Safe to call multiple times — already-fetched symbols are skipped.
-    """
-    if _fetch_status["running"]:
-        return {"message": "Fetch already in progress", **_fetch_status}
-    if not VNSTOCK_AVAILABLE:
-        raise HTTPException(
-            status_code=503,
-            detail="vnstock is not installed on this server.",
-        )
-    if len(_cache) >= target:
-        return {"message": f"Already have {len(_cache)} stocks (target={target}). Nothing to do."}
-
-    background_tasks.add_task(_fetch_all_stocks, target)
-    return {"message": f"Fetch started — targeting {target} stocks"}
-
-
 @app.delete("/api/stocks")
 def clear_stocks():
-    """Wipe cache and JSON file so you can re-fetch from scratch."""
+    """Wipe cache and JSON file so the next GET will re-fetch from scratch."""
     global _cache
     _cache = {}
     if DATA_FILE.exists():
