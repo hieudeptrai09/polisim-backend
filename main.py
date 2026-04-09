@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
-    from vnstock import Listing, Quote
+    from vnstock import Vnstock
     VNSTOCK_AVAILABLE = True
 except ImportError:
     VNSTOCK_AVAILABLE = False
@@ -80,8 +80,10 @@ def _fetch_all_stocks(target: int = 250):
     _fetch_status.update({"running": True, "failed": []})
 
     try:
-        listing = Listing()
-        all_df = listing.all_symbols(show_log=False)
+        # New API: use Vnstock().stock() to get a listing of all symbols
+        client = Vnstock()
+        listing = client.stock(symbol="VNM", source="VCI")  # symbol required but ignored for listing
+        all_df = listing.listing.all_symbols(show_log=False)
         symbol_col = "symbol" if "symbol" in all_df.columns else all_df.columns[0]
         all_symbols = all_df.dropna(subset=[symbol_col])
 
@@ -96,21 +98,22 @@ def _fetch_all_stocks(target: int = 250):
         for _, row in stocks_df.iterrows():
             sym = str(row.get("symbol", row.iloc[0])).strip().upper()
             try:
-                quote = Quote(symbol=sym, source="VCI")
-                hist = quote.history(
+                # New API: initialise per-symbol ticker object, then call quote.history
+                ticker = Vnstock().stock(symbol=sym, source="VCI")
+                hist = ticker.quote.history(
                     start="2023-01-01", end="2026-03-20",
-                    interval="1D", show_log=False,
+                    interval="1D",
                 )
                 if hist is None or len(hist) < 10:
                     raise ValueError("Không đủ dữ liệu lịch sử")
 
-                time_col   = "time"   if "time"   in hist.columns else hist.columns[0]
-                close_col  = "close"  if "close"  in hist.columns else next(c for c in hist.columns if "close"  in c.lower())
-                vol_col    = "volume" if "volume" in hist.columns else next(c for c in hist.columns if "vol"    in c.lower())
+                time_col  = "time"   if "time"   in hist.columns else hist.columns[0]
+                close_col = "close"  if "close"  in hist.columns else next(c for c in hist.columns if "close"  in c.lower())
+                vol_col   = "volume" if "volume" in hist.columns else next(c for c in hist.columns if "vol"    in c.lower())
 
-                hist       = hist.set_index(time_col).sort_index()
-                close      = hist[close_col].astype(float)
-                volume     = hist[vol_col].astype(float)
+                hist      = hist.set_index(time_col).sort_index()
+                close     = hist[close_col].astype(float)
+                volume    = hist[vol_col].astype(float)
 
                 last_raw   = float(close.iloc[-1])
                 mult       = 1000 if last_raw < 1000 else 1
@@ -119,6 +122,22 @@ def _fetch_all_stocks(target: int = 250):
                 avg_vol    = max(1000, int(volume.tail(60).mean()))
                 market_cap = round(last_close * avg_vol * 10 / 1e9, 2)
                 shares_outstanding = int(market_cap * 1e9 / last_close) if last_close > 0 else 0
+
+                # Optional: try to fetch a real fundamental value via finance.ratio
+                try:
+                    ratios = ticker.finance.ratio()
+                    if ratios is not None and not ratios.empty:
+                        # Use book value per share (bvps) as fundamental proxy if available
+                        bvps_col = next(
+                            (c for c in ratios.columns if "bvps" in c.lower() or "book" in c.lower()),
+                            None,
+                        )
+                        if bvps_col:
+                            bvps = float(ratios[bvps_col].dropna().iloc[-1])
+                            if bvps > 0:
+                                fundamental = round(bvps * mult)
+                except Exception:
+                    pass  # fall back to EMA-based fundamental
 
                 result[sym] = {
                     "symbol":            sym,
@@ -187,7 +206,6 @@ def get_all_stocks(length: int = 250):
     global _cache
     data = _cache or _load_from_disk()
 
-    # Auto-fetch if nothing in cache yet
     if not data:
         if not VNSTOCK_AVAILABLE:
             raise HTTPException(status_code=503, detail="vnstock not installed on server")
@@ -206,7 +224,6 @@ def get_stock(symbol: str):
     global _cache
     data = _cache or _load_from_disk()
 
-    # Auto-fetch if nothing in cache yet
     if not data:
         if not VNSTOCK_AVAILABLE:
             raise HTTPException(status_code=503, detail="vnstock not installed on server")
